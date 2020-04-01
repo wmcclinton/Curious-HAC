@@ -6,6 +6,8 @@ from torch.distributions.categorical import Categorical
 import random
 import statistics
 
+import numpy as np
+
 # Function from https://github.com/ikostrikov/pytorch-a2c-ppo-acktr/blob/master/model.py
 def init_params(m):
     classname = m.__class__.__name__
@@ -33,6 +35,7 @@ class ICMModel(nn.Module):
             nn.Conv2d(32, 64, (2, 2)),
             nn.ReLU()
         )
+
         n = obs_space["image"][0]
         m = obs_space["image"][1]
         self.image_embedding_size = ((n-1)//2-2)*((m-1)//2-2)*64
@@ -52,6 +55,13 @@ class ICMModel(nn.Module):
         self.embedding_size = self.semi_memory_size
         if self.use_text:
             self.embedding_size += self.text_embedding_size
+
+        # Define Pos Embedding layer
+        self.image_pos_layer = nn.Sequential(
+            nn.Linear(self.embedding_size + 2, 64),
+            nn.ReLU(),
+            nn.Linear(64, self.embedding_size)
+        )
 
         # Define Inverse model
         self.inverse_model = nn.Sequential(
@@ -79,9 +89,11 @@ class ICMModel(nn.Module):
         return self.image_embedding_size
 
     def compute_embedding(self, obs):
-        x = obs.transpose(1, 3).transpose(2, 3)
+        x = obs[0].transpose(1, 3).transpose(2, 3)
         x = self.image_conv(x)
         x = x.reshape(x.shape[0], -1)
+        x = torch.cat([x,torch.Tensor(obs[1])],dim=1)
+        x = self.image_pos_layer(x)
 
         return x
 
@@ -131,7 +143,7 @@ class IntrinsicCuriosityModule():
         self.action_space = action_space
 
         self.BETA = 0.2
-        self.LAMBDA = 100
+        self.LAMBDA = 1000
         self.batch_size = 64
         self.num_epochs = 10
         self.model = ICMModel(obs_space, action_space, use_memory=False, use_text=False)
@@ -150,10 +162,12 @@ class IntrinsicCuriosityModule():
 
     def get_batch(self):
         mem_sample = random.sample(self.memory, self.batch_size)
-        x = torch.cat([datum[0] for datum in mem_sample], 0)
-        x_ = torch.cat([datum[1] for datum in mem_sample], 0)
+        x = torch.cat([datum[0][0] for datum in mem_sample], 0)
+        pos = torch.cat([torch.Tensor(datum[0][1]) for datum in mem_sample], 0)
+        x_ = torch.cat([datum[1][0] for datum in mem_sample], 0)
+        pos_ = torch.cat([torch.Tensor(datum[1][1]) for datum in mem_sample], 0)
         actions = torch.cat([datum[2] for datum in mem_sample],0)
-        return x, x_, actions
+        return x, pos, x_, pos_, actions
 
     def update_model(self):
 
@@ -163,10 +177,11 @@ class IntrinsicCuriosityModule():
         
         for t in range(self.num_epochs):
             # Forward pass: Compute predicted y by passing x to the model
-            x, x_, actions = self.get_batch()
-            a_dist, s_pred, _ = self.model(x, x_, actions)
+            x, pos, x_, pos_, actions = self.get_batch()
 
-            L_f = self.loss_forward(s_pred, self.model.compute_embedding(x_))
+            a_dist, s_pred, _ = self.model((x, pos), (x_, pos_), actions)
+
+            L_f = self.loss_forward(s_pred, self.model.compute_embedding((x_, pos_)))
             
             target_a = torch.argmax(actions, dim=1).to(dtype=torch.long)
             L_i = self.loss_inverse(a_dist, target_a)
@@ -201,8 +216,8 @@ class IntrinsicCuriosityModule():
             action_preproccessed[0][action] = 1
 
             with torch.no_grad():
-                _, s_pred, _ = self.model(_obs_preproccessed, obs_preproccessed, action_preproccessed)
-                r_i = self.loss_forward(s_pred, self.model.compute_embedding(obs_preproccessed)).item()
+                _, s_pred, _ = self.model([_obs_preproccessed, self._obs["pos"]], [obs_preproccessed, obs["pos"]], action_preproccessed)
+                r_i = self.loss_forward(s_pred, self.model.compute_embedding((obs_preproccessed, obs["pos"]))).item()
 
         self._obs = obs
 
@@ -214,10 +229,12 @@ class IntrinsicCuriosityModule():
             for i, _ in enumerate(self.eps_memory):
                 if i > 0:
                     obs = self.preprocess_obss([self.eps_memory[i-1][0]]).image
+                    pos = self.eps_memory[i-1][0]["pos"]
                     obs_ = self.preprocess_obss([self.eps_memory[i][0]]).image
+                    pos_ = self.eps_memory[i][0]["pos"]
                     action = torch.zeros((1,self.action_space.n))
                     action[0][self.eps_memory[i][1]] = 1
-                    self.store_transition(obs, obs_, action)
+                    self.store_transition((obs, pos), (obs_, pos_), action)
 
             self.eps_memory = []
             self._obs = None

@@ -24,14 +24,15 @@ class XYObservation(ObservationWrapper):
         self.env = env
 
     def observation(self, observation):
-        observation["pos"] = (self.env.agent_pos[0], self.env.agent_pos[1])
+        observation["pos"] = [[self.env.agent_pos[0], self.env.agent_pos[1]]]
+        # add whether the agent has the key to pos
         return observation
 
 def make_env(env_key, seed=None):
     env = gym.make(env_key)
     #env = TransformReward(env,f)
     #env = FullyObsWrapper(env)
-    #env = XYObservation(env)
+    env = XYObservation(env)
 
     env.seed(seed)
     return env
